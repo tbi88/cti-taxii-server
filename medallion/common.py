@@ -158,7 +158,10 @@ def string_to_datetime(timestamp_string):
     try:
         return dt.datetime.strptime(timestamp_string, "%Y-%m-%dT%H:%M:%S.%fZ")
     except ValueError:
-        return dt.datetime.strptime(timestamp_string, "%Y-%m-%dT%H:%M:%SZ")
+        try:
+            return dt.datetime.strptime(timestamp_string, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            return dt.datetime.strptime(timestamp_string, "%Y-%m-%dT%H:%M:%S.%f%z")
 
 
 def generate_status(
@@ -289,3 +292,4 @@ def get_application_instance_config_values(flask_application_instance, config_gr
             return flask_application_instance.backend_config[config_key]
         else:
             return flask_application_instance.backend_config
+
