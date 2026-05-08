@@ -105,13 +105,18 @@ class MongoBackend(Backend):
             ("_manifest.media_type", ASCENDING),
             ("_manifest.version", ASCENDING),
         ])
-        # Covers the common "latest version" query: filter by collection + is_latest +
-        # media_type + date_added without a $setWindowFields scan.
+        # Covers the common "latest version" query pattern:
+        #   _collection_id = X, media_type = Y, _is_latest = true, date_added > T
+        # sorted by date_added / created / modified.
+        # Putting media_type before _is_latest matches the equality-prefix order the
+        # query planner sees, and appending the sort fields eliminates the sort stage.
         is_latest_index = IndexModel([
             ("_collection_id", ASCENDING),
-            ("_is_latest", ASCENDING),
             ("_manifest.media_type", ASCENDING),
+            ("_is_latest", ASCENDING),
             ("_manifest.date_added", ASCENDING),
+            ("created", ASCENDING),
+            ("modified", ASCENDING),
         ])
         objects_coll.create_indexes([
             id_index, type_index, date_index, version_index, collection_index,
