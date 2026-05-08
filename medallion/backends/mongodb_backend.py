@@ -4,7 +4,7 @@ import logging
 import uuid
 
 import environ
-from pymongo import ASCENDING, IndexModel, MongoClient
+from pymongo import ASCENDING, IndexModel, MongoClient, UpdateMany
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 from six import string_types
 
@@ -105,10 +105,18 @@ class MongoBackend(Backend):
             ("_manifest.media_type", ASCENDING),
             ("_manifest.version", ASCENDING),
         ])
+        # Covers the common "latest version" query: filter by collection + is_latest +
+        # media_type + date_added without a $setWindowFields scan.
+        is_latest_index = IndexModel([
+            ("_collection_id", ASCENDING),
+            ("_is_latest", ASCENDING),
+            ("_manifest.media_type", ASCENDING),
+            ("_manifest.date_added", ASCENDING),
+        ])
         objects_coll.create_indexes([
             id_index, type_index, date_index, version_index, collection_index,
             date_and_spec_index, version_and_spec_index, collection_and_date_index,
-            collection_id_object_index,
+            collection_id_object_index, is_latest_index,
         ])
 
     def _ensure_indexes_on_existing_db(self):
@@ -120,6 +128,80 @@ class MongoBackend(Backend):
             if "objects" in api_db.list_collection_names():
                 log.debug("Ensuring indexes on existing database %r", db_name)
                 self._ensure_indexes(api_db)
+                self._backfill_is_latest(api_db["objects"])
+
+    def _recalculate_is_latest(self, objects_coll, collection_id, object_id, media_type=None):
+        """Recompute _is_latest for all versions of one object in one collection.
+
+        After an insert or delete, call this to keep the flag consistent.
+        Uses an aggregation-pipeline update (requires MongoDB 4.2+).
+        """
+        query = {"_collection_id": collection_id, "id": object_id}
+        if media_type:
+            query["_manifest.media_type"] = media_type
+
+        # Find the maximum version per media_type for this object.
+        pipeline = [
+            {"$match": query},
+            {"$group": {
+                "_id": "$_manifest.media_type",
+                "max_version": {"$max": "$_manifest.version"},
+            }},
+        ]
+        for r in objects_coll.aggregate(pipeline):
+            mt = r["_id"]
+            max_ver = r["max_version"]
+            base_match = {"_collection_id": collection_id, "id": object_id, "_manifest.media_type": mt}
+            objects_coll.update_many(
+                base_match,
+                [{"$set": {"_is_latest": {"$eq": ["$_manifest.version", max_ver]}}}],
+            )
+
+    def _backfill_is_latest(self, objects_coll):
+        """One-time migration: set _is_latest on every document that lacks it.
+
+        Safe to call repeatedly — exits immediately when nothing needs backfilling.
+        """
+        if objects_coll.count_documents({"_is_latest": {"$exists": False}}, limit=1) == 0:
+            return
+
+        log.info("Backfilling _is_latest flags on %s …", objects_coll.full_name)
+
+        # Compute max version per (collection_id, id, media_type).
+        pipeline = [
+            {"$group": {
+                "_id": {
+                    "col": "$_collection_id",
+                    "id": "$id",
+                    "mt": "$_manifest.media_type",
+                },
+                "max_version": {"$max": "$_manifest.version"},
+            }},
+        ]
+
+        ops = []
+        for r in objects_coll.aggregate(pipeline, allowDiskUse=True):
+            col_id = r["_id"]["col"]
+            obj_id = r["_id"]["id"]
+            mt = r["_id"]["mt"]
+            max_ver = r["max_version"]
+            base = {"_collection_id": col_id, "id": obj_id, "_manifest.media_type": mt}
+            ops.append(UpdateMany(
+                {**base, "_manifest.version": max_ver},
+                {"$set": {"_is_latest": True}},
+            ))
+            ops.append(UpdateMany(
+                {**base, "_manifest.version": {"$ne": max_ver}},
+                {"$set": {"_is_latest": False}},
+            ))
+            if len(ops) >= 500:
+                objects_coll.bulk_write(ops, ordered=False)
+                ops = []
+
+        if ops:
+            objects_coll.bulk_write(ops, ordered=False)
+
+        log.info("_is_latest backfill complete on %s", objects_coll.full_name)
 
     def database_established(self):
         """
@@ -417,6 +499,9 @@ class MongoBackend(Backend):
                     new_obj.update({"_manifest": _manifest})
                     objects_info.insert_one(new_obj)
                     self._update_manifest(api_root, collection_id, media_type)
+                    # Recompute _is_latest for this object so the new version is
+                    # marked correctly and any previous latest is cleared.
+                    self._recalculate_is_latest(objects_info, collection_id, new_obj["id"], media_type)
 
                 # else: we already have the object, so this is a
                 # no-op.
@@ -496,6 +581,8 @@ class MongoBackend(Backend):
                 objects_info.delete_one(
                     {"_collection_id": collection_id, "id": object_id, "_manifest.version": obj_version}
                 )
+            # If the latest version was deleted, promote the new maximum.
+            self._recalculate_is_latest(objects_info, collection_id, object_id)
         else:
             raise ProcessingError("Object '{}' not found".format(object_id), 404)
 
@@ -581,6 +668,7 @@ class MongoBackend(Backend):
                         obj["modified"] = datetime_to_float(string_to_datetime(obj["modified"]))
                     api_db["objects"].insert_one(obj)
                 self._ensure_indexes(api_db)
+                self._backfill_is_latest(api_db["objects"])
 
     def clear_db(self):
         if "discovery_database" in self.client.list_database_names():

@@ -79,20 +79,19 @@ class MongoDBFilter(BasicFilter):
                 actual_dates = [datetime_to_float(string_to_datetime(x)) for x in match_version.split(",") if (x != "first" and x != "last")]
 
                 latest_pipeline = []
-                accumulatorOperator = None
-                # The documents are sorted in ASCENDING order.
                 if "last" in match_version:
-                    accumulatorOperator = "max"
-                if "first" in match_version:
-                    accumulatorOperator = "min"
-                if accumulatorOperator:
+                    # Use the pre-computed _is_latest flag for an O(log n) index lookup
+                    # instead of an O(n) $setWindowFields scan over all matching docs.
+                    pipeline[0]["$match"]["$and"].append({"_is_latest": True})
+                elif "first" in match_version:
+                    # "first" is rare; fall back to window function with $min.
                     latest_pipeline.append(
                         {
                             "$setWindowFields": {
                                 "partitionBy": "$id",
                                 "output": {
                                     "_picked_version": {
-                                        f"${accumulatorOperator}": "$_manifest.version"
+                                        "$min": "$_manifest.version"
                                     }
                                 }
                             }
@@ -132,7 +131,7 @@ class MongoDBFilter(BasicFilter):
         elif manifest_info == "objects":
             # Project the final results
             pipeline.append(
-                {"$project": {"_id": 0, "_collection_id": 0, "_manifest": 0}}
+                {"$project": {"_id": 0, "_collection_id": 0, "_manifest": 0, "_is_latest": 0}}
             )
 
             count = self.get_result_count(pipeline, data)
