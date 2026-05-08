@@ -73,11 +73,53 @@ class MongoBackend(Backend):
                     log.info("Initializing Mongo DB backend using " + kwargs.get("filename"))
                     self.initialize_mongodb_with_data(kwargs.get("filename"))
                     self.object_manifest_check()
+            else:
+                self._ensure_indexes_on_existing_db()
 
             super(MongoBackend, self).__init__(**kwargs)
 
         except ConnectionFailure:
             log.error("Unable to establish a connection to MongoDB server {}".format(kwargs.get("uri")))
+
+    def _ensure_indexes(self, api_db):
+        """Create or update indexes on the objects collection of an api root database.
+
+        This method is idempotent — PyMongo skips indexes that already exist with
+        the same key pattern, so it is safe to call on both new and existing databases.
+        """
+        objects_coll = api_db["objects"]
+        id_index = IndexModel([("id", ASCENDING)])
+        type_index = IndexModel([("type", ASCENDING)])
+        collection_index = IndexModel([("_collection_id", ASCENDING)])
+        date_index = IndexModel([("_manifest.date_added", ASCENDING)])
+        version_index = IndexModel([("_manifest.version", ASCENDING)])
+        date_and_spec_index = IndexModel([("_manifest.media_type", ASCENDING), ("_manifest.date_added", ASCENDING)])
+        version_and_spec_index = IndexModel([("_manifest.media_type", ASCENDING), ("_manifest.version", ASCENDING)])
+        collection_and_date_index = IndexModel([("_collection_id", ASCENDING), ("_manifest.date_added", ASCENDING)])
+        # Covers the duplicate-check in add_objects and the existence check in
+        # _validate_object_id.  Putting id second (after _collection_id) makes
+        # these point lookups O(log n) instead of scanning the whole collection.
+        collection_id_object_index = IndexModel([
+            ("_collection_id", ASCENDING),
+            ("id", ASCENDING),
+            ("_manifest.media_type", ASCENDING),
+            ("_manifest.version", ASCENDING),
+        ])
+        objects_coll.create_indexes([
+            id_index, type_index, date_index, version_index, collection_index,
+            date_and_spec_index, version_and_spec_index, collection_and_date_index,
+            collection_id_object_index,
+        ])
+
+    def _ensure_indexes_on_existing_db(self):
+        """Apply current index definitions to all api root databases that already exist."""
+        for db_name in self.client.list_database_names():
+            if db_name in ("discovery_database", "admin", "local", "config"):
+                continue
+            api_db = self.client[db_name]
+            if "objects" in api_db.list_collection_names():
+                log.debug("Ensuring indexes on existing database %r", db_name)
+                self._ensure_indexes(api_db)
 
     def database_established(self):
         """
@@ -538,18 +580,7 @@ class MongoBackend(Backend):
                         # not for data markings
                         obj["modified"] = datetime_to_float(string_to_datetime(obj["modified"]))
                     api_db["objects"].insert_one(obj)
-                id_index = IndexModel([("id", ASCENDING)])
-                type_index = IndexModel([("type", ASCENDING)])
-                collection_index = IndexModel([("_collection_id", ASCENDING)])
-                date_index = IndexModel([("_manifest.date_added", ASCENDING)])
-                version_index = IndexModel([("_manifest.version", ASCENDING)])
-                date_and_spec_index = IndexModel([("_manifest.media_type", ASCENDING), ("_manifest.date_added", ASCENDING)])
-                version_and_spec_index = IndexModel([("_manifest.media_type", ASCENDING), ("_manifest.version", ASCENDING)])
-                collection_and_date_index = IndexModel([("_collection_id", ASCENDING), ("_manifest.date_added", ASCENDING)])
-                api_db["objects"].create_indexes(
-                    [id_index, type_index, date_index, version_index, collection_index, date_and_spec_index,
-                     version_and_spec_index, collection_and_date_index]
-                )
+                self._ensure_indexes(api_db)
 
     def clear_db(self):
         if "discovery_database" in self.client.list_database_names():
