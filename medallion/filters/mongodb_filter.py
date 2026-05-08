@@ -121,42 +121,31 @@ class MongoDBFilter(BasicFilter):
         pipeline.append({"$sort": SON([("_manifest.date_added", ASCENDING), ("created", ASCENDING), ("modified", ASCENDING)])})
 
         if manifest_info == "manifests":
-            # Project the final results
             pipeline.append({"$project": {"_manifest": 1}})
             pipeline.append({"$replaceRoot": {"newRoot": "$_manifest"}})
-
-            count = self.get_result_count(pipeline, data)
-            self.add_pagination_operations(pipeline)
-            results = list(data.aggregate(pipeline, allowDiskUse=True))
         elif manifest_info == "objects":
-            # Project the final results
             pipeline.append(
                 {"$project": {"_id": 0, "_collection_id": 0, "_manifest": 0, "_is_latest": 0}}
             )
 
-            count = self.get_result_count(pipeline, data)
-            self.add_pagination_operations(pipeline)
-            results = list(data.aggregate(pipeline, allowDiskUse=True))
-        else:
-            # Return raw data from Mongodb
-            count = self.get_result_count(pipeline, data)
-            self.add_pagination_operations(pipeline)
-            results = list(data.aggregate(pipeline, allowDiskUse=True))
+        self.add_pagination_operations(pipeline)
+        results = list(data.aggregate(pipeline, allowDiskUse=True))
 
-        return count, results
+        # Determine whether more pages exist by having fetched limit+1 results.
+        # Trim the sentinel document so callers always receive at most limit items.
+        limit = self.record.get("limit") if self.record else None
+        if limit and len(results) > limit:
+            has_more = True
+            results = results[:limit]
+        else:
+            has_more = False
+
+        return has_more, results
 
     def add_pagination_operations(self, pipeline):
-        if self.record:
+        if self.record and "limit" in self.record:
             pipeline.append({"$skip": self.record["skip"]})
-            pipeline.append({"$limit": self.record["limit"]})
-
-    def get_result_count(self, pipeline, data):
-        count_pipeline = list(pipeline)
-        count_pipeline.append({"$count": "total"})
-        count_result = list(data.aggregate(count_pipeline, allowDiskUse=True))
-
-        if len(count_result) == 0:
-            # No results
-            return 0
-        return count_result[0]["total"]
+            # Fetch one extra document so we can detect whether another page exists
+            # without running a separate count aggregation.
+            pipeline.append({"$limit": self.record["limit"] + 1})
 

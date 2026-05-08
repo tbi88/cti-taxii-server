@@ -234,12 +234,12 @@ class MongoBackend(Backend):
             record = {}
         return next_id, record
 
-    def _update_record(self, next_id, count, internal=False):
+    def _update_record(self, next_id, has_more, internal=False):
         more = False
         if next_id:
-            if internal is False:
+            if not internal:
                 self.pages[next_id]["skip"] += self.pages[next_id]["limit"]
-            if self.pages[next_id]["skip"] >= count:
+            if not has_more:
                 self.pages.pop(next_id, None)
                 next_id = None
             else:
@@ -308,7 +308,7 @@ class MongoBackend(Backend):
             allowed_filters,
             record
         )
-        count, objects_found = full_filter.process_filter(
+        has_more, objects_found = full_filter.process_filter(
             objects_info,
             allowed_filters,
             "manifests",
@@ -318,7 +318,7 @@ class MongoBackend(Backend):
             obj["date_added"] = datetime_to_string(float_to_datetime(obj["date_added"]))
             obj["version"] = datetime_to_string_stix(float_to_datetime(obj["version"]))
 
-        next_id, more = self._update_record(next_id, count, internal)
+        next_id, more = self._update_record(next_id, has_more, internal)
         manifest_resource = create_resource("objects", objects_found, more, next_id)
         if internal:
             return manifest_resource
@@ -442,7 +442,7 @@ class MongoBackend(Backend):
         )
         # Note: error handling was not added to following call as mongo will
         # handle (user supplied) filters gracefully if they don't exist
-        count, objects_found = full_filter.process_filter(
+        has_more, objects_found = full_filter.process_filter(
             objects_info,
             allowed_filters,
             "objects"
@@ -457,7 +457,7 @@ class MongoBackend(Backend):
         manifest_resource = self._get_object_manifest(api_root, collection_id, filter_args, allowed_filters, limit, True)
         headers = get_custom_headers(manifest_resource)
 
-        next_id, more = self._update_record(next_id, count)
+        next_id, more = self._update_record(next_id, has_more)
         return create_resource("objects", objects_found, more, next_id), headers
 
     @catch_mongodb_error
@@ -544,7 +544,7 @@ class MongoBackend(Backend):
             allowed_filters,
             record
         )
-        count, objects_found = full_filter.process_filter(
+        has_more, objects_found = full_filter.process_filter(
             objects_info,
             allowed_filters,
             "objects"
@@ -559,7 +559,7 @@ class MongoBackend(Backend):
         manifest_resource = self._get_object_manifest(api_root, collection_id, filter_args, ("id", "type", "version", "spec_version"), limit, True)
         headers = get_custom_headers(manifest_resource)
 
-        next_id, more = self._update_record(next_id, count)
+        next_id, more = self._update_record(next_id, has_more)
         return create_resource("objects", objects_found, more, next_id), headers
 
     @catch_mongodb_error
@@ -575,7 +575,7 @@ class MongoBackend(Backend):
             {"_collection_id": {"$eq": collection_id}, "id": {"$eq": object_id}},
             allowed_filters,
         )
-        count, objects_found = full_filter.process_filter(
+        has_more, objects_found = full_filter.process_filter(
             objects_info,
             allowed_filters,
             "raw"
@@ -608,7 +608,7 @@ class MongoBackend(Backend):
             allowed_filters,
             record
         )
-        count, manifests_found = full_filter.process_filter(
+        has_more, manifests_found = full_filter.process_filter(
             objects_info,
             allowed_filters,
             "manifests",
@@ -618,7 +618,7 @@ class MongoBackend(Backend):
         headers = get_custom_headers(manifest_resource)
 
         manifests_found = list(map(lambda x: datetime_to_string_stix(float_to_datetime(x["version"])), manifests_found))
-        next_id, more = self._update_record(next_id, count)
+        next_id, more = self._update_record(next_id, has_more)
         return create_resource("versions", manifests_found, more, next_id), headers
 
     def load_data_from_file(self, filename):
