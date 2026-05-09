@@ -235,16 +235,14 @@ class MongoBackend(Backend):
         return next_id, record
 
     def _update_record(self, next_id, has_more, internal=False):
-        more = False
-        if next_id:
-            if not internal:
-                self.pages[next_id]["skip"] += self.pages[next_id]["limit"]
+        # Internal calls (manifest fetches inside get_objects / get_object / get_object_versions)
+        # must not touch self.pages — the outer caller owns the record lifecycle.
+        if next_id and not internal:
+            self.pages[next_id]["skip"] += self.pages[next_id]["limit"]
             if not has_more:
                 self.pages.pop(next_id, None)
                 next_id = None
-            else:
-                more = True
-        return next_id, more
+        return next_id, has_more
 
     def _validate_object_id(self, manifest_info, collection_id, object_id):
         result = list(manifest_info.find({"_collection_id": collection_id, "id": object_id}).limit(1))
